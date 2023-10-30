@@ -1,75 +1,79 @@
+from datetime import datetime
 import aiohttp
 import asyncio
-from datetime import datetime
+import hashlib
+import time
+import os
 
-BOT_TOKEN = "6374582132:AAEMjw8CO2YRLNvEAl0VSzZ9AXTvaU9u96A"
-CHAT_ID = "-823196726"
-LINK_URL = "https://kaconkalus.site/checker/Link.txt"
+class NawalaChecker:
+    def __init__(self):
+        self.PANEL_URL = os.environ.get("PANEL_URL", "https://greyhal.com")
+        self.PANEL_SALT = os.environ.get("PANEL_SALT", "dskvjmf39svcm")
+        self.CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 60 * 5))
 
-async def check_nawala_domain(session, url):
-    try:
-        async with session.get(url) as response:
-            if any(text in await response.text() for text in ["This site can’t be reached", "Situs ini tidak dapat dijangkau", "SITUS DIBLOKIR"]):
-                return True
-            else:
-                return False
-    except aiohttp.ClientError:
-        return True
+    def generate_salt(self):
+        date = datetime.now().strftime("%Y%m%d")
+        return hashlib.md5(f"{date}{self.PANEL_SALT}".encode('utf-8')).hexdigest()
 
-async def send_telegram_message(session, message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message}
-    async with session.post(url, data=data) as response:
-        return await response.json()
+    async def send_to_panel(self, domain, remark):
+        url = f"{self.PANEL_URL}/api-checker/deactivate-url"
+        salt = self.generate_salt()
+        data = {"salt": salt, "domain": domain, "remark": remark}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data) as response:
+                response_data = await response.json()
+                return response_data
 
-async def main():
-    output_file = "Nawala.txt"
-    interval_minutes = 15  # Interval waktu dalam menit
+    async def check_url(self, session, url):
+        try:
+            async with session.get(url, allow_redirects=True) as response:
+                result = await response.text()
+                nawala_params = ["This site can’t be reached", "Situs ini tidak dapat dijangkau", "SITUS DIBLOKIR", "trustpositif"]
+                if any(text in result for text in nawala_params):
+                    raise ValueError("Nawala")
+                # if url not in str(response.url):
+                #     raise ValueError(f"Redirected to: {response.url}")
+        except aiohttp.ClientConnectionError as e:
+            error_msg = f"Client Error: {url}\n{str(e)}\n"
+            print(error_msg)
+        except Exception as e:
+            error_msg = f"Nawala Error: {url}\n{str(e)}\n"
+            print(error_msg)
+            await self.send_to_panel(url, str(e))
 
-    async with aiohttp.ClientSession() as session:
+    async def run_check(self):
         while True:
             try:
-                async with session.get(LINK_URL) as response:
-                    domain_list = (await response.text()).splitlines()
-            except aiohttp.ClientError:
-                print("Gagal mendapatkan daftar domain dari URL.")
-                domain_list = []
+                print("Start checking...")
+                start_time = time.time()
+                get_list_domain = f"{self.PANEL_URL}/api-checker/get-list-url"
+                salt = self.generate_salt()
+                data = {"salt": salt}
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(get_list_domain, data=data) as response:
+                        data = await response.json()
+                        domain_list = data.get('data')
+                    
+                    tasks = [self.check_url(session, url) for url in domain_list]
+                    await asyncio.gather(*tasks)
+                
+                execution_time = time.time() - start_time
+                date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"Finished in : {execution_time:.2f} seconds | {date}")
+                await asyncio.sleep(self.CHECK_INTERVAL)
+            except Exception as e:
+                print(f"Application crashed: {e}")
+                print("Restarting in 10 seconds...")
+                await asyncio.sleep(10)
 
-            nawala_domains = []
-
-            tasks = []
-            for domain in domain_list:
-                domain = domain.strip()
-                if domain.startswith("http://") or domain.startswith("https://"):
-                    url = domain
-                else:
-                    url = "https://" + domain
-
-                tasks.append(check_nawala_domain(session, url))
-
-            results = await asyncio.gather(*tasks)
-
-            for domain, result in zip(domain_list, results):
-                if result:
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    nawala_domains.append(f"{domain} | {timestamp}")
-
-            if nawala_domains:
-                message = "\n".join(nawala_domains)
-                await send_telegram_message(session, message)
-
-            with open(output_file, "a") as nawala_file:
-                nawala_file.write("==================================\n")
-                nawala_file.write("----------------------------------\n\n")
-
-                for domain in nawala_domains:
-                    nawala_file.write(f"{domain}\n")
-
-                nawala_file.write("\n==================================\n")
-
-            print("Pengecekan Selesai! Domain terkena nawala telah disimpan dan pesan telah dikirim.")
-
-            await asyncio.sleep(interval_minutes * 60)
+async def main():
+    while True:
+        try:
+            nawala_checker = NawalaChecker()
+            await nawala_checker.run_check()
+        except Exception as e:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
